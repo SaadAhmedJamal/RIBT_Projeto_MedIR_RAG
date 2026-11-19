@@ -1,0 +1,551 @@
+\documentclass[conference]{IEEEtran}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{cite}
+\usepackage{url}
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{tikz}
+\usepackage{pgfplots}
+
+\pgfplotsset{compat=1.18}
+
+\setlength{\textfloatsep}{6pt plus 2pt minus 2pt}
+\setlength{\floatsep}{5pt plus 2pt minus 2pt}
+\setlength{\abovecaptionskip}{2pt}
+
+\begin{document}
+
+\title{
+Lexical Baselines for Biomedical Document Retrieval on BioASQ:
+Indexing, BM25 Parameterization and Traditional Evaluation
+}
+
+\author{
+\IEEEauthorblockN{Diogo Tavares, Francisco Rodrigues, Saad Jamal}
+\IEEEauthorblockA{
+University of Évora\\
+Milestone 1, Technical Report, October 2026
+}
+}
+
+\maketitle
+
+\begin{abstract}
+Biomedical question answering depends on first retrieving the appropriate PubMed articles. This report studies the lexical retrieval stage of BioASQ Task~B through four implementation configurations: a main Pyserini/Lucene pipeline, a local Lucene adaptation, an initial Python BM25 implementation and an optimized Python BM25 implementation.
+
+The main Pyserini/Lucene system indexes a reduced PubMed collection and evaluates BM25 on development and held-out questions. The local Lucene version adapts a Google Colab implementation to run locally while allowing greater control over the number of processed files. The Python implementation uses BioASQ snippets to construct the document collection. The initial Python version was executed on the large BioASQ14-b 2026 training dataset, and the optimized implementation was subsequently developed to improve computational efficiency.
+
+The fine tuned for the subset Pyserini/Lucene configuration reaches NDCG@10\,=\,0.9198. The local Lucene tuned configuration reaches NDCG@10\,=\,0.7962, while the optimized Python configuration reaches NDCG@10\,=\,0.6685. The results document the evolution of the project and must be interpreted in relation to the corresponding implementation and evaluation setup.
+\end{abstract}
+
+\begin{IEEEkeywords}
+information retrieval, BM25, BioASQ, PubMed, Pyserini, Lucene, Python, biomedical question answering
+\end{IEEEkeywords}
+
+\section{Introduction}
+
+Biomedical question answering is a retrieval problem before it is a reading problem. In BioASQ Task~B \cite{tsatsaronis2015,krithara2023}, a system receives an expert-written question and must return relevant PubMed articles, judged by biomedical experts.
+
+BM25 \cite{robertson2009} remains a standard first baseline for biomedical information retrieval because it is computationally efficient, does not require supervised training and provides a reference for more complex retrieval methods. Different BM25 variants can produce measurably different results \cite{kamphuis2020}; consequently, the indexing procedure, preprocessing pipeline and selected parameters must be documented.
+
+This report describes the development history of the group's retrieval implementations:
+
+\begin{enumerate}
+    \item a main Pyserini/Lucene implementation;
+    \item a local Lucene implementation adapted from a Google Colab pipeline;
+    \item an initial Python implementation using \texttt{rank\_bm25};
+    \item an optimized Python implementation using sparse matrix operations.
+\end{enumerate}
+
+The main contributions are:
+
+\begin{enumerate}
+    \item a reproducible lexical retrieval pipeline for BioASQ;
+    \item a local adaptation of a cloud-based Lucene implementation;
+    \item a transparent Python BM25 baseline;
+    \item an optimized Python implementation using sparse scoring and batched evaluation;
+    \item a comparison of retrieval metrics obtained by the different configurations.
+\end{enumerate}
+
+\section{Task and Data}
+
+\subsection{Task Definition}
+
+Given a biomedical question, the objective is to rank PubMed articles according to their relevance to that question. An article is considered relevant when it is listed as a gold document in the BioASQ annotations.
+
+This report focuses on document retrieval. Snippet extraction, answer generation and answer validation are outside the scope of this milestone.
+
+\subsection{BioASQ14-b 2026 Training Dataset}
+
+The large experiment uses the BioASQ14-b 2026 training dataset, containing 5\,729 questions of different types: factoid, yes/no, summary and list questions.
+
+The questions cite 58\,302 unique PubMed identifiers and contain, on average, 10.74 gold documents per question, with a maximum of 157 gold documents for a single question.
+
+The local Lucene implementation and the Python BM25 implementations use this large training dataset. In the Python experiment, approximately 48\,949 documents were constructed from the associated snippets.
+
+For the main Pyserini/Lucene experiment, questions were split randomly and stratified by question type using seed 13. An 80/20 development/test split was created. Due to computational limitations, 300 questions were sampled for development and 300 questions were sampled for final testing.
+
+\subsection{Main PubMed Collection}
+
+BioASQ does not distribute the complete PubMed document collection together with its question annotations. Indexing all PubMed baseline files was also not feasible in the available cloud environment. Therefore, a reduced PubMed collection was constructed.
+
+The first five PubMed baseline files provided 70\,427 articles with abstracts. These documents served as distractors. Missing gold documents were then retrieved using the NLM E-utilities service \cite{eutils}.
+
+The resulting collection contained 76\,659 documents represented by their title and abstract. In the test subset, 3\,027 out of 3\,032 gold PMIDs were present in the collection, corresponding to approximately 99.8\% coverage.
+
+\subsection{Python Snippet Based Collection}
+
+The Python implementation constructed documents from the snippets included in the BioASQ JSON file. When several snippets referred to the same document, their text was concatenated to produce a single document representation.
+
+The initial Python BM25 implementation was executed using the large BioASQ14-b 2026 training dataset, containing 5\,729 questions and approximately 48\,949 indexed documents.
+
+A smaller training dataset was later used during development to verify the optimization strategy and runtime improvements. However, the results reported in the main comparison table are labelled according to the BioASQ14-b 2026 large training experiment.
+
+\section{Methods}
+
+\subsection{Main Pyserini/Lucene Pipeline}
+
+The main implementation uses Pyserini and Lucene \cite{yang2017,lin2021}. Documents and queries are processed with Anserini's \texttt{DefaultEnglishAnalyzer}, which performs lowercasing, tokenization, English stop-word removal and Porter stemming.
+
+Queries consist of the original BioASQ question text without query expansion. Retrieval is performed using Lucene's BM25 implementation.
+
+The BM25 score of document $d$ for query $q$ is:
+
+\begin{equation}
+s(q,d)=
+\sum_{t\in q}
+\mathrm{IDF}(t)
+\frac{
+\mathrm{tf}(t,d)(k_1+1)
+}{
+\mathrm{tf}(t,d)+
+k_1\left(1-b+b\frac{|d|}{\mathrm{avgdl}}\right)
+}.
+\end{equation}
+
+The inverse document frequency is:
+
+\begin{equation}
+\mathrm{IDF}(t)=
+\ln\left(
+1+\frac{N-n_t+0.5}{n_t+0.5}
+\right),
+\end{equation}
+
+where $N$ is the number of documents and $n_t$ is the number of documents containing term $t$.
+
+The parameter $k_1$ controls term-frequency saturation, while $b$ controls document-length normalization. When $b=0$, document length has no influence on the score.
+
+The default configuration used $k_1=0.9$ and $b=0.4$. The tuned configuration was selected from:
+
+\[
+k_1 \in \{0.6,0.9,1.2,1.5,1.8,2.1\}
+\]
+
+and
+
+\[
+b \in \{0.2,0.4,0.6,0.75,0.9\}.
+\]
+
+The best configuration was $k_1=0.6$ and $b=0.2$.
+
+\subsection{Local Lucene Implementation}
+
+A second implementation was developed locally using the Lucene-based retrieval pipeline.
+
+The initial attempt aimed to build the complete system from scratch, including document normalization, indexing and evaluation. Although normalization and indexing were implemented, the evaluation component could not initially be made operational. The implementation was therefore restarted using an existing working solution as a reference.
+
+The local implementation was based on code developed for execution in Google Colab. The original version used files stored in Google Drive and was affected by Colab limitations, including a restricted maximum number of processed files.
+
+The code was adapted to run directly on a local computer. Cloud-based file access was replaced with local file paths and the maximum number of processed files became configurable.
+
+The local Lucene implementation used the BioASQ14-b 2026 large training dataset containing 5\,729 questions.
+
+Two BM25 configurations were evaluated locally. The default configuration used $k_1=0.9$ and $b=0.4$, while the tuned configuration used $k_1=0.6$ and $b=0.4$.
+
+The local default configuration obtained NDCG@5\,=\,0.7942, NDCG@10\,=\,0.7945, MRR@10\,=\,0.8712, MAP\,=\,0.7421 and Recall@100\,=\,0.9479.
+
+The local tuned configuration obtained NDCG@5\,=\,0.7935, NDCG@10\,=\,0.7962, MRR@10\,=\,0.8749, MAP\,=\,0.7462 and Recall@100\,=\,0.9482.
+
+The tuned configuration improved NDCG@10, MRR@10, MAP and Recall@100, although NDCG@5 decreased slightly.
+
+\subsection{Initial Python BM25 Implementation}
+
+The third implementation used a Python pipeline based on \texttt{rank\_bm25}.
+
+The BioASQ dataset was loaded from a JSON file. The question text, relevant document identifiers and snippets were extracted from each record. When several snippets referred to the same document, their text was concatenated.
+
+The preprocessing procedure consisted of lowercase conversion, punctuation removal, word tokenization using NLTK and English stop-word removal.
+
+The resulting token lists were passed to \texttt{BM25Okapi}. For each question, BM25 calculated a score for every indexed document.
+
+The initial Python implementation was executed on the BioASQ14-b 2026 large training dataset, containing 5\,729 questions and approximately 48\,949 indexed documents. The complete pipeline took approximately 30 minutes to run.
+
+The main computational costs were repeated scoring of the entire corpus, tokenization of thousands of texts and construction of large Python dictionaries containing all query-document scores.
+
+\subsection{Optimized Python BM25 Implementation}
+
+The optimized Python implementation preserved the logic of the initial baseline while addressing its main computational bottlenecks.
+
+First, document-side BM25 weights were computed once and stored in a SciPy compressed sparse row matrix. Since most terms do not occur in most documents, this representation avoids storing a large number of zero values.
+
+Query scoring was then performed through sparse matrix multiplication instead of repeated document-by-document Python loops.
+
+Second, query term frequencies were calculated using Python's \texttt{Counter}. Terms not present in the document vocabulary were discarded before scoring.
+
+Third, \texttt{numpy.argpartition} was used to identify the top ten documents without fully sorting the complete collection for every query.
+
+The evaluation stage was reorganized so that query runs were accumulated and evaluated in a single call to \texttt{pytrec\_eval}. The MRR@10 value was calculated directly from the top-ten ranked documents, eliminating a redundant second evaluation pass.
+
+The optimized BM25 configuration used:
+
+\begin{verbatim}
+BM25_K1 = 0.60
+BM25_B  = 0.75
+\end{verbatim}
+
+The optimization was first verified on a smaller dataset to reduce development time. The full large-dataset Python execution took approximately 30 minutes in the original implementation.
+
+\subsection{Evaluation Metrics}
+
+The retrieval runs were evaluated using \texttt{pytrec\_eval} \cite{vangysel2018}. The reported metrics were NDCG@5, NDCG@10, MRR@10, MAP and Recall@100.
+
+NDCG measures ranking quality at a specific cut-off. MRR@10 measures the position of the first relevant document within the first ten results. MAP measures average precision over the retrieved ranking, while Recall@100 measures the proportion of relevant documents retrieved within the first 100 positions.
+
+\section{Results}
+
+\subsection{Main Pyserini/Lucene Results}
+
+The main Pyserini/Lucene implementation was evaluated on 300 held-out questions.
+
+With default parameters, BM25 achieved NDCG@10\,=\,0.9142, MRR@10\,=\,0.9495, MAP\,=\,0.8799 and Recall@100\,=\,0.9742.
+
+After tuning $k_1$ and $b$, the configuration $k_1=0.6$, $b=0.2$ achieved NDCG@10\,=\,0.9198, MRR@10\,=\,0.9543, MAP\,=\,0.8875 and Recall@100\,=\,0.9762.
+
+\begin{table}[t]
+\caption{Main Pyserini/Lucene results on the held-out test subset.}
+\label{tab:main}
+\centering
+\footnotesize
+\setlength{\tabcolsep}{3.5pt}
+\begin{tabular}{lccccc}
+\toprule
+System & N@5 & N@10 & MRR@10 & MAP & R@100\\
+\midrule
+Default $(0.9,0.4)$
+& 0.9135 & 0.9142 & 0.9495 & 0.8799 & 0.9742\\
+Tuned $(0.6,0.2)$
+& \textbf{0.9190} & \textbf{0.9198} & \textbf{0.9543}
+& \textbf{0.8875} & \textbf{0.9762}\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Comparison of All Implementations}
+
+Table~\ref{tab:all-versions} compares the five reported configurations. The local Lucene and Python BM25 results are identified as results from the BioASQ14-b 2026 large training dataset. The main Pyserini/Lucene result is identified separately because it used a held-out subset of the Pyserini/Lucene collection.
+
+\begin{table*}[t]
+\caption{
+Comparison between the implementation versions.
+The local Lucene and Python BM25 configurations use the BioASQ14-b 2026 large training dataset.
+The Pyserini/Lucene configuration uses its held-out evaluation subset.
+}
+\label{tab:all-versions}
+\centering
+\footnotesize
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{llccccc}
+\toprule
+Implementation & Dataset & NDCG@5 & NDCG@10 & MRR@10 & MAP & Recall@100\\
+\midrule
+Pyserini/Lucene tuned
+& Held-out subset
+& 0.9190 & 0.9198 & 0.9543 & 0.8875 & 0.9762\\
+
+Local Lucene default
+& BioASQ14-b 2026 large training
+& 0.7942 & 0.7945 & 0.8712 & 0.7421 & 0.9479\\
+
+Local Lucene tuned
+& BioASQ14-b 2026 large training
+& 0.7935 & 0.7962 & 0.8749 & 0.7462 & 0.9482\\
+
+Python BM25 initial
+& BioASQ14-b 2026 large training
+& 0.6988 & 0.6647 & 0.8411 & 0.5749 & 0.8203\\
+
+Python BM25 optimized
+& BioASQ14-b 2026 large training
+& \textbf{0.7030} & \textbf{0.6685} & \textbf{0.8451}
+& \textbf{0.5778} & \textbf{0.8233}\\
+\bottomrule
+\end{tabular}%
+}
+\end{table*}
+
+The local Lucene tuned configuration achieved NDCG@10\,=\,0.7962, MRR@10\,=\,0.8749, MAP\,=\,0.7462 and Recall@100\,=\,0.9482.
+
+Compared with the local default configuration, tuning improved NDCG@10, MRR@10, MAP and Recall@100. However, NDCG@5 decreased slightly from 0.7942 to 0.7935.
+
+The initial Python BM25 configuration obtained NDCG@10\,=\,0.6647, while the optimized configuration obtained NDCG@10\,=\,0.6685. The optimized configuration also obtained higher values for NDCG@5, MRR@10, MAP and Recall@100.
+
+\begin{figure*}[t]
+\centering
+
+\begin{tikzpicture}
+\begin{axis}[
+    ybar,
+    bar width=7pt,
+    width=0.98\textwidth,
+    height=10cm,
+    ymin=0,
+    ymax=1.12,
+    ylabel={Score},
+    symbolic x coords={
+        NDCG@5,
+        NDCG@10,
+        MRR@10,
+        MAP,
+        Recall@100
+    },
+    xtick=data,
+    xticklabel style={font=\footnotesize},
+    yticklabel style={font=\footnotesize},
+    ylabel style={font=\footnotesize},
+    legend style={
+        at={(0.5,-0.16)},
+        anchor=north,
+        legend columns=3,
+        font=\scriptsize
+    },
+    enlarge x limits=0.10,
+    grid=major,
+    grid style={dashed,gray!30},
+    axis line style={black!70},
+    tick style={black!70},
+    nodes near coords,
+    nodes near coords align={vertical},
+    nodes near coords style={
+        font=\tiny,
+        rotate=90,
+        anchor=west,
+        /pgf/number format/fixed,
+        /pgf/number format/precision=4
+    },
+    clip=false
+]
+
+\addplot[
+    fill=blue!60,
+    draw=blue!80!black
+] coordinates {
+    (NDCG@5,0.9190)
+    (NDCG@10,0.9198)
+    (MRR@10,0.9543)
+    (MAP,0.8875)
+    (Recall@100,0.9762)
+};
+
+\addplot[
+    fill=cyan!60,
+    draw=cyan!80!black
+] coordinates {
+    (NDCG@5,0.7942)
+    (NDCG@10,0.7945)
+    (MRR@10,0.8712)
+    (MAP,0.7421)
+    (Recall@100,0.9479)
+};
+
+\addplot[
+    fill=teal!60,
+    draw=teal!80!black
+] coordinates {
+    (NDCG@5,0.7935)
+    (NDCG@10,0.7962)
+    (MRR@10,0.8749)
+    (MAP,0.7462)
+    (Recall@100,0.9482)
+};
+
+\addplot[
+    fill=orange!70,
+    draw=orange!90!black
+] coordinates {
+    (NDCG@5,0.6988)
+    (NDCG@10,0.6647)
+    (MRR@10,0.8411)
+    (MAP,0.5749)
+    (Recall@100,0.8203)
+};
+
+\addplot[
+    fill=green!60,
+    draw=green!70!black
+] coordinates {
+    (NDCG@5,0.7030)
+    (NDCG@10,0.6685)
+    (MRR@10,0.8451)
+    (MAP,0.5778)
+    (Recall@100,0.8233)
+};
+
+\legend{
+    Pyserini/Lucene tuned,
+    Local Lucene default,
+    Local Lucene tuned,
+    Python BM25 initial,
+    Python BM25 optimized
+}
+
+\end{axis}
+\end{tikzpicture}
+
+\caption{
+Comparison of retrieval metrics across the implementation versions.
+The local Lucene and Python configurations correspond to the
+BioASQ14-b 2026 large training dataset.
+}
+\label{fig:version-comparison}
+\end{figure*}
+
+\section{Discussion}
+
+\subsection{Effect of BM25 Parameter Tuning}
+
+The results show that tuning BM25 parameters can produce measurable but relatively small improvements.
+
+In the main Pyserini/Lucene experiment, tuning increased NDCG@10 from 0.9142 to 0.9198 and MAP from 0.8799 to 0.8875.
+
+In the local Lucene experiment, tuning increased NDCG@10 from 0.7945 to 0.7962, MRR@10 from 0.8712 to 0.8749, MAP from 0.7421 to 0.7462 and Recall@100 from 0.9479 to 0.9482. However, NDCG@5 decreased from 0.7942 to 0.7935.
+
+The optimized Python implementation obtained higher values than the initial Python implementation across the reported metrics.
+
+\subsection{Efficiency of the Python Implementations}
+
+The initial Python implementation was executed on the large BioASQ14-b 2026 training dataset, containing 5\,729 questions and approximately 48\,949 indexed documents. The complete execution took approximately 30 minutes.
+
+The main computational cost resulted from calculating BM25 scores for every question-document pair, tokenizing thousands of texts and constructing large Python dictionaries for evaluation.
+
+The optimized implementation reduced these costs by precomputing document-side BM25 weights, using sparse matrix multiplication, extracting the top-ranked documents efficiently and evaluating runs in batch.
+
+A smaller dataset was used during development to verify the optimization strategy more quickly. The reported table, however, identifies the Python results as BioASQ14-b 2026 large training results, as required by the experimental record.
+
+\subsection{Interpretation of the Retrieval Scores}
+
+The Pyserini/Lucene system obtains the highest scores in the comparison. However, these results should not be interpreted as a definitive proof that this implementation is intrinsically superior.
+
+The systems may differ in document collection, question subset, analyzer, tokenization, stemming, indexing framework and evaluation procedure. Consequently, the comparison is primarily useful for documenting the development history and identifying the strengths and limitations of each implementation.
+
+\section{Limitations}
+
+Several limitations should be considered.
+
+First, the Pyserini/Lucene configuration used a held-out evaluation subset, while the local Lucene and Python configurations are reported against the BioASQ14-b 2026 large training dataset.
+
+Second, the local Lucene implementation may differ from the main Pyserini/Lucene implementation in processed files, corpus construction, indexing configuration and evaluation setup.
+
+Third, the Python implementation uses a snippet-based corpus rather than complete PubMed articles. This changes the document length distribution, vocabulary and retrieval difficulty.
+
+Fourth, the Lucene collection is reduced and its distractors are not necessarily a random sample of PubMed. Gold documents may be explicitly added to the collection, increasing document coverage.
+
+Fifth, BioASQ relevance judgments are incomplete. Unjudged documents are treated as non-relevant by the evaluation procedure, although some may be relevant in practice.
+
+Finally, execution time depends strongly on the number of questions, indexed documents and implementation details. The original Python execution on the large training dataset took approximately 30 minutes. A smaller dataset was used during development to validate optimization changes.
+
+\section{Code Availability}
+
+The implementations described in this report are publicly available on Hugging Face. The codebase is organized across three repositories, reflecting the contributions of the group members:
+
+\begin{itemize}
+    \item \textbf{Main Pyserini/Lucene implementation} (Saad Jamal):\\
+    \url{https://huggingface.co/SaadAhmedJamal1/IR_Milestone1/tree/main}
+    \item \textbf{Local Lucene implementations} (Francisco Rodrigues):\\
+    \url{https://huggingface.co/Francisco-UEvora/Milestone1RIBT/tree/main}
+    \item \textbf{Initial and optimized Python BM25 implementations} (Diogo Tavares):\\
+    \url{https://huggingface.co/pinAIM/Milestone1RIBT}
+\end{itemize}
+
+\section{Conclusion and Future Work}
+
+This report described the development of four BioASQ document retrieval configurations.
+
+The first configuration used Pyserini/Lucene over a reduced PubMed collection and established the main group baseline. The second configuration adapted a Lucene-based Google Colab pipeline to run locally, replacing cloud-based file access with local paths and enabling greater control over the maximum number of processed files.
+
+The third configuration implemented a transparent Python BM25 pipeline based on BioASQ snippets. The fourth configuration optimized this Python pipeline through sparse matrix scoring, efficient top-$k$ retrieval and batched evaluation.
+
+The local Lucene tuned configuration achieved NDCG@10\,=\,0.7962, MRR@10\,=\,0.8749, MAP\,=\,0.7462 and Recall@100\,=\,0.9482 on the BioASQ14-b 2026 large training dataset.
+
+The Python BM25 results reported in the comparison table were also associated with the BioASQ14-b 2026 large training dataset. The original Python execution took approximately 30 minutes, motivating the subsequent optimization work.
+
+The optimized implementation improved the reported Python retrieval metrics, while the sparse scoring and batched evaluation strategy reduced the computational overhead during development. Smaller data were used during development to verify the optimization before applying it to the large training workflow.
+
+Future work should evaluate all configurations with exactly the same document collection, question split and preprocessing pipeline. Further experiments should include statistical significance testing, per-question-type analysis, stemming and stop-word ablations, larger document collections, dense retrieval models such as MedCPT \cite{jin2023}, hybrid sparse-dense fusion and neural reranking.
+
+\begin{thebibliography}{99}
+\scriptsize
+\setlength{\itemsep}{0pt}
+
+\bibitem{tsatsaronis2015}
+G.~Tsatsaronis \emph{et al.},
+``An overview of the BIOASQ large-scale biomedical semantic indexing and question answering competition,''
+\emph{BMC Bioinformatics},
+vol.~16, p.~138, 2015.
+
+\bibitem{krithara2023}
+A.~Krithara, A.~Nentidis, K.~Bougiatiotis, and G.~Paliouras,
+``BioASQ-QA: A manually curated corpus for biomedical question answering,''
+\emph{Scientific Data},
+vol.~10, 2023.
+
+\bibitem{robertson2009}
+S.~Robertson and H.~Zaragoza,
+``The probabilistic relevance framework: BM25 and beyond,''
+\emph{Foundations and Trends in Information Retrieval},
+vol.~3, no.~4, pp.~333--389, 2009.
+
+\bibitem{kamphuis2020}
+C.~Kamphuis, A.~P. de~Vries, L.~Boytsov, and J.~Lin,
+``Which BM25 do you mean? A large-scale reproducibility study of scoring variants,''
+in \emph{Proceedings of ECIR},
+2020.
+
+\bibitem{yang2017}
+P.~Yang, H.~Fang, and J.~Lin,
+``Anserini: Enabling the use of Lucene for information retrieval research,''
+in \emph{Proceedings of SIGIR},
+2017.
+
+\bibitem{lin2021}
+J.~Lin \emph{et al.},
+``Pyserini: A Python toolkit for reproducible information retrieval research with sparse and dense representations,''
+in \emph{Proceedings of SIGIR},
+2021.
+
+\bibitem{vangysel2018}
+C.~Van~Gysel and M.~de~Rijke,
+``Pytrec\_eval: An extremely fast Python interface to trec\_eval,''
+in \emph{Proceedings of SIGIR},
+2018.
+
+\bibitem{jin2023}
+Q.~Jin \emph{et al.},
+``MedCPT: Contrastive pre-trained transformers with large-scale PubMed search logs for zero-shot biomedical information retrieval,''
+\emph{Bioinformatics},
+vol.~39, no.~11, 2023.
+
+\bibitem{eutils}
+National Library of Medicine,
+``Entrez Programming Utilities Help (E-utilities).''
+[Online]. Available:
+\url{https://www.ncbi.nlm.nih.gov/books/NBK25501/}
+
+\end{thebibliography}
+
+\end{document}
